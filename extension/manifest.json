@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "Murmur",
+  "version": "0.1.0",
+  "description": "Speak quietly into your phone; the text appears in the AI chat box on your laptop.",
+  "permissions": ["storage", "alarms"],
+  "host_permissions": ["http://*/*", "https://*/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://claude.ai/*",
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*",
+        "https://gemini.google.com/*",
+        "https://aistudio.google.com/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Murmur"
+  }
+}

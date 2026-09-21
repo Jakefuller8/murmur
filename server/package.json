@@ -1,0 +1,13 @@
+{
+  "name": "murmur-relay",
+  "version": "0.1.0",
+  "description": "Relays transcribed text from a phone to a browser extension, and serves the phone client.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test.js"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

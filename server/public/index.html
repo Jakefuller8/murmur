@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#15171c">
+<title>Murmur</title>
+<style>
+  :root {
+    --ink: #15171c;
+    --raised: #1f232b;
+    --edge: #2c313b;
+    --fg: #e9edf3;
+    --dim: #8b95a3;
+    --live: #4ec78f;
+    --signal: #3d7bf7;
+    --warn: #e0a33e;
+  }
+
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+  html, body {
+    margin: 0;
+    height: 100%;
+    overflow: hidden;
+    background: var(--ink);
+    color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    -webkit-user-select: none;
+    user-select: none;
+    overscroll-behavior: none;
+  }
+
+  body {
+    display: flex;
+    flex-direction: column;
+    padding: env(safe-area-inset-top) 20px calc(env(safe-area-inset-bottom) + 20px);
+  }
+
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 18px 0 0;
+    font-size: 14px;
+    color: var(--dim);
+  }
+
+  .status { display: flex; align-items: center; gap: 8px; }
+
+  .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--dim);
+    transition: background .25s;
+  }
+  .dot[data-state="paired"] { background: var(--live); }
+  .dot[data-state="waiting"] { background: var(--warn); }
+
+  .code {
+    font-variant-numeric: tabular-nums;
+    letter-spacing: .14em;
+    font-size: 14px;
+    color: var(--fg);
+    background: none;
+    border: 0;
+    border-bottom: 1px solid var(--edge);
+    width: 7.5ch;
+    padding: 2px 0;
+    text-align: right;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    text-transform: uppercase;
+  }
+  .code:focus { outline: none; border-bottom-color: var(--signal); }
+
+  main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    min-height: 0;
+    padding: 24px 0;
+  }
+
+  .transcript {
+    font-size: 21px;
+    line-height: 1.45;
+    max-height: 100%;
+    overflow-y: auto;
+    color: var(--fg);
+  }
+  .transcript:empty::before {
+    content: "Hold the button and speak quietly.";
+    color: var(--dim);
+    font-size: 17px;
+  }
+  .transcript .partial { color: var(--dim); }
+
+  .talk {
+    position: relative;
+    width: 100%;
+    height: 132px;
+    border: 0;
+    border-radius: 22px;
+    background: var(--raised);
+    color: var(--fg);
+    font-size: 17px;
+    font-weight: 500;
+    letter-spacing: .01em;
+    transition: background .12s, transform .12s;
+    touch-action: none;
+  }
+  .talk:disabled { color: var(--dim); }
+  .talk[data-held="true"] {
+    background: var(--signal);
+    transform: scale(.985);
+  }
+
+  .meter {
+    position: absolute;
+    left: 50%; bottom: 26px;
+    transform: translateX(-50%);
+    display: flex;
+    gap: 4px;
+    height: 16px;
+    align-items: flex-end;
+    opacity: 0;
+    transition: opacity .2s;
+  }
+  .talk[data-held="true"] .meter { opacity: .9; }
+  .meter i {
+    display: block;
+    width: 3px;
+    background: #fff;
+    border-radius: 2px;
+    height: 4px;
+  }
+
+  footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding-top: 16px;
+    font-size: 14px;
+    color: var(--dim);
+  }
+
+  label.toggle { display: flex; align-items: center; gap: 8px; }
+  input[type=checkbox] { width: 18px; height: 18px; accent-color: var(--signal); }
+
+  .note {
+    font-size: 13px;
+    color: var(--warn);
+    padding-top: 10px;
+    line-height: 1.5;
+  }
+  .note:empty { display: none; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="status">
+    <span class="dot" id="dot" data-state="off"></span>
+    <span id="statusText">Connecting</span>
+  </div>
+  <input class="code" id="room" maxlength="6" autocomplete="off" autocorrect="off" spellcheck="false" aria-label="Pairing code">
+</header>
+
+<main>
+  <div class="transcript" id="transcript" aria-live="polite"></div>
+</main>
+
+<div class="note" id="note"></div>
+
+<button class="talk" id="talk" disabled>
+  Hold to talk
+  <span class="meter" id="meter"><i></i><i></i><i></i><i></i><i></i></span>
+</button>
+
+<footer>
+  <label class="toggle">
+    <input type="checkbox" id="autosend">
+    Send on release
+  </label>
+  <span id="hint">Keep this screen open</span>
+</footer>
+
+<script>
+(function () {
+  "use strict";
+
+  var ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+
+  function newCode() {
+    var out = "";
+    var buf = new Uint8Array(6);
+    crypto.getRandomValues(buf);
+    for (var i = 0; i < 6; i++) out += ALPHABET[buf[i] % ALPHABET.length];
+    return out;
+  }
+
+  var els = {
+    dot: document.getElementById("dot"),
+    statusText: document.getElementById("statusText"),
+    room: document.getElementById("room"),
+    transcript: document.getElementById("transcript"),
+    talk: document.getElementById("talk"),
+    meter: document.getElementById("meter"),
+    autosend: document.getElementById("autosend"),
+    note: document.getElementById("note"),
+    hint: document.getElementById("hint")
+  };
+
+  var room =
+    (location.hash.slice(1) || localStorage.getItem("murmur.room") || newCode())
+      .toUpperCase()
+      .replace(/[^A-Z2-9]/g, "")
+      .slice(0, 6);
+
+  if (room.length !== 6) room = newCode();
+
+  els.room.value = room;
+  els.autosend.checked = localStorage.getItem("murmur.autosend") === "1";
+  persist();
+
+  var ws = null;
+  var reconnectTimer = null;
+  var pingTimer = null;
+  var peers = 0;
+
+  function persist() {
+    localStorage.setItem("murmur.room", room);
+    history.replaceState(null, "", "#" + room);
+  }
+
+  function setStatus(state, text) {
+    els.dot.dataset.state = state;
+    els.statusText.textContent = text;
+  }
+
+  function connect() {
+    clearTimeout(reconnectTimer);
+    if (ws) {
+      try { ws.close(); } catch (e) {}
+    }
+
+    var proto = location.protocol === "https:" ? "wss:" : "ws:";
+    ws = new WebSocket(proto + "//" + location.host + "/?room=" + room);
+
+    ws.onopen = function () {
+      setStatus("waiting", "Waiting for laptop");
+      clearInterval(pingTimer);
+      pingTimer = setInterval(function () {
+        if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: "ping" }));
+      }, 25000);
+    };
+
+    ws.onmessage = function (ev) {
+      var msg;
+      try { msg = JSON.parse(ev.data); } catch (e) { return; }
+      if (msg.type === "presence") {
+        peers = msg.count;
+        if (peers >= 2) setStatus("paired", "Paired");
+        else setStatus("waiting", "Waiting for laptop");
+      }
+    };
+
+    ws.onclose = function (ev) {
+      clearInterval(pingTimer);
+      if (ev.code === 4001) {
+        setStatus("off", "Code already in use");
+        return;
+      }
+      setStatus("off", "Reconnecting");
+      reconnectTimer = setTimeout(connect, 1500);
+    };
+
+    ws.onerror = function () {};
+  }
+
+  function send(obj) {
+    if (ws && ws.readyState === 1) {
+      ws.send(JSON.stringify(obj));
+      return true;
+    }
+    return false;
+  }
+
+  els.room.addEventListener("change", function () {
+    var next = els.room.value.toUpperCase().replace(/[^A-Z2-9]/g, "").slice(0, 6);
+    if (next.length !== 6) {
+      els.room.value = room;
+      return;
+    }
+    room = next;
+    els.room.value = room;
+    persist();
+    connect();
+  });
+
+  els.autosend.addEventListener("change", function () {
+    localStorage.setItem("murmur.autosend", els.autosend.checked ? "1" : "0");
+  });
+
+  // ---- speech recognition -------------------------------------------------
+
+  var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+  if (!SR) {
+    els.note.textContent =
+      "This browser can't transcribe. On iPhone use Safari; on Android use Chrome.";
+    els.talk.textContent = "Not supported";
+    connect();
+    return;
+  }
+
+  var recog = null;
+  var held = false;
+  var finalText = "";
+  var partialText = "";
+
+  function renderTranscript() {
+    els.transcript.textContent = finalText;
+    if (partialText) {
+      var span = document.createElement("span");
+      span.className = "partial";
+      span.textContent = (finalText ? " " : "") + partialText;
+      els.transcript.appendChild(span);
+    }
+  }
+
+  function buildRecognizer() {
+    var r = new SR();
+    r.continuous = true;
+    r.interimResults = true;
+    r.lang = navigator.language || "en-US";
+    r.maxAlternatives = 1;
+
+    r.onresult = function (ev) {
+      partialText = "";
+      for (var i = ev.resultIndex; i < ev.results.length; i++) {
+        var chunk = ev.results[i][0].transcript;
+        if (ev.results[i].isFinal) {
+          finalText += (finalText ? " " : "") + chunk.trim();
+        } else {
+          partialText += chunk;
+        }
+      }
+      renderTranscript();
+    };
+
+    r.onerror = function (ev) {
+      if (ev.error === "not-allowed" || ev.error === "service-not-allowed") {
+        els.note.textContent =
+          "Microphone blocked. Allow mic access for this site, then reload.";
+        held = false;
+        els.talk.dataset.held = "false";
+      } else if (ev.error === "no-speech") {
+        els.note.textContent = "Didn't catch that. Try speaking a little louder.";
+      }
+    };
+
+    // Safari ends the session on its own. Restart while the button is held.
+    r.onend = function () {
+      if (held) {
+        try { r.start(); } catch (e) {}
+      }
+    };
+
+    return r;
+  }
+
+  function startTalking() {
+    if (held) return;
+    held = true;
+    finalText = "";
+    partialText = "";
+    els.note.textContent = "";
+    els.talk.dataset.held = "true";
+    renderTranscript();
+    animateMeter(true);
+
+    if (!recog) recog = buildRecognizer();
+    try {
+      recog.start();
+    } catch (e) {
+      // start() throws if already running; that's fine.
+    }
+  }
+
+  function stopTalking() {
+    if (!held) return;
+    held = false;
+    els.talk.dataset.held = "false";
+    animateMeter(false);
+
+    try { recog.stop(); } catch (e) {}
+
+    // Give Safari a beat to flush the last final result.
+    setTimeout(function () {
+      var text = (finalText + " " + partialText).trim();
+      partialText = "";
+      renderTranscript();
+      if (!text) return;
+
+      var ok = send({ type: "text", text: text });
+      if (!ok) {
+        els.note.textContent = "Not connected. Text not sent.";
+        return;
+      }
+      if (els.autosend.checked) send({ type: "submit" });
+      if (navigator.vibrate) navigator.vibrate(12);
+    }, 350);
+  }
+
+  var meterTimer = null;
+  function animateMeter(on) {
+    var bars = els.meter.querySelectorAll("i");
+    clearInterval(meterTimer);
+    if (!on) {
+      bars.forEach(function (b) { b.style.height = "4px"; });
+      return;
+    }
+    meterTimer = setInterval(function () {
+      bars.forEach(function (b) {
+        b.style.height = (4 + Math.random() * 12).toFixed(0) + "px";
+      });
+    }, 120);
+  }
+
+  els.talk.disabled = false;
+
+  els.talk.addEventListener("pointerdown", function (e) {
+    e.preventDefault();
+    els.talk.setPointerCapture(e.pointerId);
+    startTalking();
+  });
+
+  els.talk.addEventListener("pointerup", function (e) {
+    e.preventDefault();
+    stopTalking();
+  });
+
+  els.talk.addEventListener("pointercancel", stopTalking);
+  window.addEventListener("blur", stopTalking);
+
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden) stopTalking();
+  });
+
+  els.talk.addEventListener("contextmenu", function (e) { e.preventDefault(); });
+
+  if (!("wakeLock" in navigator)) {
+    els.hint.textContent = "Keep screen on";
+  } else {
+    navigator.wakeLock.request("screen").then(function () {
+      els.hint.textContent = "Screen stays on";
+    }).catch(function () {});
+  }
+
+  connect();
+})();
+</script>
+</body>
+</html>
