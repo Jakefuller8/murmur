@@ -87,6 +87,8 @@ async function connect() {
     let msg;
     try { msg = JSON.parse(ev.data); } catch { return; }
 
+    if (msg.type === "keepalive" || msg.type === "pong") return;
+
     if (msg.type === "presence") {
       state.paired = msg.count >= 2;
       publish();
@@ -105,7 +107,7 @@ async function connect() {
     state.connected = false;
     state.paired = false;
     publish();
-    if (ev.code !== 4000 && ev.code !== 4001) scheduleRetry();
+    if (ev.code !== 4000) scheduleRetry();
   };
 
   socket.onerror = () => {};
@@ -116,14 +118,15 @@ function scheduleRetry() {
   setTimeout(connect, retryDelay);
 }
 
-chrome.alarms.create("keepalive", { periodInMinutes: 0.34 });
+// chrome.alarms clamps to a 1-minute floor, which is slower than Chrome's 30s
+// idle timeout — so an alarm alone cannot keep this worker alive. It serves only
+// to resurrect the worker if it does die. Staying alive is the server's job: it
+// pushes a keepalive message every 20s, and inbound WebSocket traffic resets the
+// idle timer.
+chrome.alarms.create("revive", { periodInMinutes: 1 });
 
 chrome.alarms.onAlarm.addListener(() => {
-  if (socket && socket.readyState === 1) {
-    socket.send(JSON.stringify({ type: "ping" }));
-  } else {
-    connect();
-  }
+  if (!socket || socket.readyState > 1) connect();
 });
 
 chrome.runtime.onMessage.addListener((msg, _sender, respond) => {

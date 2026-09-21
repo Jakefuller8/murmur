@@ -82,7 +82,7 @@ async function main() {
       bad.sock.readyState === 3 && bad.info() && bad.info().code === 4000,
       JSON.stringify(bad.info()));
 
-    const phone = await open("ABC234");
+    let phone = await open("ABC234");
     ok("accepts a valid room code", !phone.rejectedAtOpen);
 
     await sleep(120);
@@ -99,9 +99,18 @@ async function main() {
 
     const third = await open("ABC234");
     await sleep(250);
-    ok("refuses a third device",
-      third.sock.readyState === 3 && third.info() && third.info().code === 4001,
-      JSON.stringify(third.info()));
+    ok("accepts a reconnect instead of refusing it", third.sock.readyState === 1);
+    ok("evicts the stale socket it replaced",
+      phone.sock.readyState === 3 && phone.info() && phone.info().code === 4002,
+      JSON.stringify(phone.info()));
+    third.sock.close();
+    await sleep(200);
+
+    // Re-establish the phone for the relaying tests below.
+    const phone2 = await open("ABC234");
+    await sleep(200);
+    ok("room is usable again after the churn", phone2.sock.readyState === 1);
+    phone = phone2;
 
     console.log("\nRelaying");
     laptop.inbox.length = 0;
@@ -137,6 +146,13 @@ async function main() {
     phone.sock.send(JSON.stringify({ type: "ping" }));
     await sleep(150);
     ok("answers ping with pong", phone.inbox.some((m) => m.type === "pong"));
+
+    laptop.inbox.length = 0;
+    console.log("  (waiting 22s for a server keepalive — this is the service worker fix)");
+    await sleep(22000);
+    ok("server pushes a keepalive inside Chrome's 30s idle window",
+      laptop.inbox.some((m) => m.type === "keepalive"),
+      JSON.stringify(laptop.inbox.slice(0, 3)));
 
     console.log("\nUnicode and size");
     laptop.inbox.length = 0;

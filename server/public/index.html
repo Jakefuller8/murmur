@@ -261,6 +261,7 @@
     ws.onmessage = function (ev) {
       var msg;
       try { msg = JSON.parse(ev.data); } catch (e) { return; }
+      if (msg.type === "keepalive" || msg.type === "pong") return;
       if (msg.type === "presence") {
         peers = msg.count;
         if (peers >= 2) setStatus("paired", "Paired");
@@ -270,8 +271,8 @@
 
     ws.onclose = function (ev) {
       clearInterval(pingTimer);
-      if (ev.code === 4001) {
-        setStatus("off", "Code already in use");
+      if (ev.code === 4002) {
+        setStatus("off", "Opened somewhere else");
         return;
       }
       setStatus("off", "Reconnecting");

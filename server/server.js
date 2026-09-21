@@ -85,10 +85,21 @@ wss.on("connection", (ws, req) => {
   if (!rooms.has(room)) rooms.set(room, new Set());
   const peers = rooms.get(room);
 
-  // Two devices per room: one phone, one laptop. Reject a third.
+  // Two devices per room: one phone, one laptop. If a third arrives, assume
+  // it is a reconnect whose predecessor has not been reaped yet and evict the
+  // oldest socket. Rejecting the newcomer instead causes a reconnect loop:
+  // Chrome restarts the extension's service worker faster than the heartbeat
+  // notices the dead socket, so the fresh connection gets refused every time.
   if (peers.size >= 2) {
-    ws.close(4001, "Room full");
-    return;
+    const oldest = peers.values().next().value;
+    if (oldest) {
+      peers.delete(oldest);
+      try {
+        oldest.close(4002, "Replaced by a newer connection");
+      } catch {
+        oldest.terminate();
+      }
+    }
   }
 
   peers.add(ws);
@@ -130,8 +141,13 @@ wss.on("connection", (ws, req) => {
   });
 });
 
-// Drop dead sockets so rooms don't fill up with ghosts.
+// Two jobs here. Dropping dead sockets so rooms don't fill with ghosts, and
+// sending a real text message every 20s. That second part matters: Chrome
+// terminates an extension service worker after 30s idle, and receiving a
+// WebSocket message resets that timer. Protocol-level ping frames are handled
+// by the browser and don't reliably count, so this sends an actual message.
 const heartbeat = setInterval(() => {
+  const keepalive = JSON.stringify({ type: "keepalive", t: Date.now() });
   for (const ws of wss.clients) {
     if (!ws._alive) {
       ws.terminate();
@@ -139,8 +155,9 @@ const heartbeat = setInterval(() => {
     }
     ws._alive = false;
     ws.ping();
+    if (ws.readyState === 1) ws.send(keepalive);
   }
-}, 30000);
+}, 20000);
 
 process.on("SIGTERM", () => clearInterval(heartbeat));
 
