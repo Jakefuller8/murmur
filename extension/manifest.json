@@ -1,13 +1,15 @@
 {
   "manifest_version": 3,
   "name": "Murmur",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Speak quietly into your phone; the text appears in the AI chat box on your laptop.",
-  "permissions": ["storage", "alarms"],
-  "host_permissions": ["http://*/*", "https://*/*"],
-  "background": {
-    "service_worker": "background.js"
-  },
+  "permissions": [
+    "storage"
+  ],
+  "host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
   "content_scripts": [
     {
       "matches": [
@@ -17,7 +19,9 @@
         "https://gemini.google.com/*",
         "https://aistudio.google.com/*"
       ],
-      "js": ["content.js"],
+      "js": [
+        "content.js"
+      ],
       "run_at": "document_idle"
     }
   ],

@@ -180,16 +180,105 @@
     }, 1600);
   }
 
-  chrome.runtime.onMessage.addListener((msg, _sender, respond) => {
-    if (msg.type === "insert") {
-      const ok = insert(msg.text);
-      if (!ok) toast("Couldn't find the chat box — click into it once", true);
-      respond({ ok });
-      return true;
+  // ---- status pill -------------------------------------------------------
+  // Visible on the page so you can tell at a glance whether the phone is
+  // linked, without opening the popup.
+
+  let pill = null;
+
+  function showPill(text, tone) {
+    if (!pill) {
+      pill = document.createElement("div");
+      Object.assign(pill.style, {
+        position: "fixed",
+        top: "10px",
+        right: "12px",
+        padding: "5px 11px",
+        borderRadius: "999px",
+        font: "500 12px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+        zIndex: "2147483646",
+        pointerEvents: "none",
+        transition: "opacity .2s",
+        opacity: "0.92",
+      });
+      document.documentElement.appendChild(pill);
     }
-    if (msg.type === "submit") {
-      respond({ ok: submit() });
-      return true;
+    const tones = {
+      live: ["#1c6b45", "#e4f4ec"],
+      wait: ["#7a5a12", "#fdf3da"],
+      dead: ["#9c2f26", "#fbe8e6"],
+    };
+    const [fg, bg] = tones[tone] || tones.dead;
+    pill.textContent = text;
+    pill.style.color = fg;
+    pill.style.background = bg;
+  }
+
+  // ---- long-polling loop -------------------------------------------------
+  // fetch() from a content script uses extension privileges, so page CSP
+  // cannot block it. The loop lives in the page, so it survives as long as
+  // the tab does — no service worker to be killed.
+
+  let config = { relay: "", room: "" };
+  let running = false;
+  let backoff = 1000;
+
+  function base() {
+    let host = config.relay.replace(/^https?:\/\//, "").replace(/\/+$/, "");
+    return "https://" + host;
+  }
+
+  function handle(messages) {
+    for (const msg of messages) {
+      if (msg.type === "text") {
+        if (!insert(msg.text)) {
+          toast("Couldn't find the chat box — click into it once", true);
+        }
+      } else if (msg.type === "submit") {
+        submit();
+      }
     }
+  }
+
+  async function loop() {
+    if (running) return;
+    running = true;
+
+    for (;;) {
+      const { relay, room } = config;
+      if (!relay || !/^[A-Z2-9]{6}$/.test(room)) {
+        showPill("Murmur not set up", "dead");
+        await new Promise((r) => setTimeout(r, 3000));
+        continue;
+      }
+
+      try {
+        const res = await fetch(
+          `${base()}/poll?room=${encodeURIComponent(room)}`,
+          { method: "GET", cache: "no-store" }
+        );
+        if (!res.ok) throw new Error("status " + res.status);
+
+        const data = await res.json();
+        backoff = 1000;
+        showPill("Murmur linked", "live");
+        if (data.messages && data.messages.length) handle(data.messages);
+      } catch {
+        showPill("Murmur offline", "dead");
+        await new Promise((r) => setTimeout(r, backoff));
+        backoff = Math.min(backoff * 1.7, 15000);
+      }
+    }
+  }
+
+  chrome.storage.sync.get(["relay", "room"], (stored) => {
+    config.relay = stored.relay || "";
+    config.room = (stored.room || "").toUpperCase();
+    loop();
+  });
+
+  chrome.storage.onChanged.addListener((changes) => {
+    if (changes.relay) config.relay = changes.relay.newValue || "";
+    if (changes.room) config.room = (changes.room.newValue || "").toUpperCase();
   });
 })();

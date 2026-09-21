@@ -226,10 +226,7 @@
   els.autosend.checked = localStorage.getItem("murmur.autosend") === "1";
   persist();
 
-  var ws = null;
-  var reconnectTimer = null;
-  var pingTimer = null;
-  var peers = 0;
+  var lastPresence = 0;
 
   function persist() {
     localStorage.setItem("murmur.room", room);
@@ -241,53 +238,42 @@
     els.statusText.textContent = text;
   }
 
-  function connect() {
-    clearTimeout(reconnectTimer);
-    if (ws) {
-      try { ws.close(); } catch (e) {}
-    }
-
-    var proto = location.protocol === "https:" ? "wss:" : "ws:";
-    ws = new WebSocket(proto + "//" + location.host + "/?room=" + room);
-
-    ws.onopen = function () {
-      setStatus("waiting", "Waiting for laptop");
-      clearInterval(pingTimer);
-      pingTimer = setInterval(function () {
-        if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: "ping" }));
-      }, 25000);
-    };
-
-    ws.onmessage = function (ev) {
-      var msg;
-      try { msg = JSON.parse(ev.data); } catch (e) { return; }
-      if (msg.type === "keepalive" || msg.type === "pong") return;
-      if (msg.type === "presence") {
-        peers = msg.count;
-        if (peers >= 2) setStatus("paired", "Paired");
+  // Ask the relay whether a laptop is polling this room.
+  function checkPresence() {
+    fetch("/presence?room=" + encodeURIComponent(room), { cache: "no-store" })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        lastPresence = Date.now();
+        if (d.laptop) setStatus("paired", "Paired");
         else setStatus("waiting", "Waiting for laptop");
-      }
-    };
-
-    ws.onclose = function (ev) {
-      clearInterval(pingTimer);
-      if (ev.code === 4002) {
-        setStatus("off", "Opened somewhere else");
-        return;
-      }
-      setStatus("off", "Reconnecting");
-      reconnectTimer = setTimeout(connect, 1500);
-    };
-
-    ws.onerror = function () {};
+      })
+      .catch(function () {
+        setStatus("off", "Can't reach relay");
+      });
   }
 
-  function send(obj) {
-    if (ws && ws.readyState === 1) {
-      ws.send(JSON.stringify(obj));
-      return true;
-    }
-    return false;
+  function sendText(text, alsoSubmit) {
+    return fetch("/say?room=" + encodeURIComponent(room), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: text })
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (!d.delivered) {
+          els.note.textContent = "Sent, but no laptop is listening on this code.";
+        }
+        if (alsoSubmit) {
+          return fetch("/say?room=" + encodeURIComponent(room), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ submit: true })
+          });
+        }
+      })
+      .catch(function () {
+        els.note.textContent = "Couldn't reach the relay. Text not sent.";
+      });
   }
 
   els.room.addEventListener("change", function () {
@@ -299,12 +285,15 @@
     room = next;
     els.room.value = room;
     persist();
-    connect();
+    checkPresence();
   });
 
   els.autosend.addEventListener("change", function () {
     localStorage.setItem("murmur.autosend", els.autosend.checked ? "1" : "0");
   });
+
+  checkPresence();
+  setInterval(checkPresence, 4000);
 
   // ---- speech recognition -------------------------------------------------
 
@@ -314,7 +303,6 @@
     els.note.textContent =
       "This browser can't transcribe. On iPhone use Safari; on Android use Chrome.";
     els.talk.textContent = "Not supported";
-    connect();
     return;
   }
 
@@ -407,12 +395,7 @@
       renderTranscript();
       if (!text) return;
 
-      var ok = send({ type: "text", text: text });
-      if (!ok) {
-        els.note.textContent = "Not connected. Text not sent.";
-        return;
-      }
-      if (els.autosend.checked) send({ type: "submit" });
+      sendText(text, els.autosend.checked);
       if (navigator.vibrate) navigator.vibrate(12);
     }, 350);
   }
@@ -462,7 +445,6 @@
     }).catch(function () {});
   }
 
-  connect();
 })();
 </script>
 </body>

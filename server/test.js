@@ -1,12 +1,9 @@
-// Integration tests for the relay. Run with: node test.js
-// Spawns the real server and drives it with Node's built-in WebSocket client.
+// Integration tests for the long-polling relay. Run with: node test.js
 
 const { spawn } = require("child_process");
-const http = require("http");
 
-const PORT = 39411;
+const PORT = 39412;
 const BASE = `http://127.0.0.1:${PORT}`;
-const WS = `ws://127.0.0.1:${PORT}`;
 
 let passed = 0;
 let failed = 0;
@@ -21,35 +18,25 @@ function ok(name, condition, detail) {
   }
 }
 
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function get(path) {
+  const res = await fetch(BASE + path, { cache: "no-store" });
+  const text = await res.text();
+  let body = null;
+  try { body = JSON.parse(text); } catch {}
+  return { status: res.status, body, text };
 }
 
-function open(room) {
-  return new Promise((resolve, reject) => {
-    const sock = new WebSocket(`${WS}/?room=${room}`);
-    const inbox = [];
-    let closeInfo = null;
-
-    sock.addEventListener("message", (ev) => inbox.push(JSON.parse(ev.data)));
-    sock.addEventListener("open", () => resolve({ sock, inbox, info: () => closeInfo }));
-    sock.addEventListener("close", (ev) => {
-      closeInfo = { code: ev.code, reason: ev.reason };
-      resolve({ sock, inbox, info: () => closeInfo, rejectedAtOpen: true });
-    });
-    sock.addEventListener("error", () => {});
-    setTimeout(() => reject(new Error("timeout opening " + room)), 3000);
+async function post(path, payload) {
+  const res = await fetch(BASE + path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
   });
-}
-
-function get(path) {
-  return new Promise((resolve) => {
-    http.get(BASE + path, (res) => {
-      let body = "";
-      res.on("data", (d) => (body += d));
-      res.on("end", () => resolve({ status: res.statusCode, body, headers: res.headers }));
-    }).on("error", () => resolve({ status: 0, body: "" }));
-  });
+  let body = null;
+  try { body = await res.json(); } catch {}
+  return { status: res.status, body };
 }
 
 async function main() {
@@ -65,131 +52,111 @@ async function main() {
   await sleep(700);
 
   try {
-    console.log("\nHTTP");
+    console.log("\nBasics");
+    const health = await get("/health");
+    ok("health reports ok", health.status === 200 && health.body.ok === true);
+    ok("health reports a version", typeof health.body.version === "string",
+      JSON.stringify(health.body));
+
     const home = await get("/");
-    ok("serves the phone page", home.status === 200 && home.body.includes("Hold to talk"));
-    ok("sends html content type", /text\/html/.test(home.headers["content-type"] || ""));
-    const missing = await get("/nope.js");
-    ok("404s unknown paths", missing.status === 404);
-    const escape = await get("/../server.js");
-    ok("blocks path traversal", escape.status === 404 || escape.status === 403,
-      `got ${escape.status}`);
+    ok("serves the phone page", home.status === 200 && home.text.includes("Hold to talk"));
+    ok("404s unknown paths", (await get("/nope.js")).status === 404);
+    ok("blocks path traversal", (await get("/../server.js")).status >= 400);
 
-    console.log("\nPairing");
-    const bad = await open("abc");
-    await sleep(250);
-    ok("rejects a malformed room code",
-      bad.sock.readyState === 3 && bad.info() && bad.info().code === 4000,
-      JSON.stringify(bad.info()));
+    console.log("\nValidation");
+    ok("rejects a bad room on poll", (await get("/poll?room=abc")).status === 400);
+    ok("rejects a bad room on say",
+      (await post("/say?room=abc", { text: "hi" })).status === 400);
+    ok("rejects an empty say",
+      (await post("/say?room=ABC234", {})).status === 400);
+    ok("rejects oversized text",
+      (await post("/say?room=ABC234", { text: "x".repeat(25000) })).status === 413);
 
-    let phone = await open("ABC234");
-    ok("accepts a valid room code", !phone.rejectedAtOpen);
+    console.log("\nPresence");
+    let pres = await get("/presence?room=ZZZ234");
+    ok("reports nobody in an unused room",
+      pres.body.laptop === false && pres.body.phone === false);
 
-    await sleep(120);
-    ok("reports one device present",
-      phone.inbox.some((m) => m.type === "presence" && m.count === 1),
-      JSON.stringify(phone.inbox));
-
-    const laptop = await open("ABC234");
-    await sleep(150);
-    ok("reports two devices once paired",
-      phone.inbox.some((m) => m.type === "presence" && m.count === 2));
-    ok("tells the laptop it is paired",
-      laptop.inbox.some((m) => m.type === "presence" && m.count === 2));
-
-    const third = await open("ABC234");
-    await sleep(250);
-    ok("accepts a reconnect instead of refusing it", third.sock.readyState === 1);
-    ok("evicts the stale socket it replaced",
-      phone.sock.readyState === 3 && phone.info() && phone.info().code === 4002,
-      JSON.stringify(phone.info()));
-    third.sock.close();
+    // Start a poll without awaiting it — this is the laptop arriving.
+    let pending = get("/poll?room=ABC234");
     await sleep(200);
+    pres = await get("/presence?room=ABC234");
+    ok("sees the laptop once it polls", pres.body.laptop === true);
 
-    // Re-establish the phone for the relaying tests below.
-    const phone2 = await open("ABC234");
-    await sleep(200);
-    ok("room is usable again after the churn", phone2.sock.readyState === 1);
-    phone = phone2;
+    console.log("\nDelivery");
+    const said = await post("/say?room=ABC234", { text: "hello from the cafe" });
+    ok("accepts the text", said.status === 200 && said.body.ok === true);
+    ok("confirms a laptop was listening", said.body.delivered === true);
 
-    console.log("\nRelaying");
-    laptop.inbox.length = 0;
-    phone.sock.send(JSON.stringify({ type: "text", text: "hello from the cafe" }));
+    const delivered = await pending;
+    ok("the waiting poll returns immediately",
+      delivered.body.messages.length === 1 &&
+        delivered.body.messages[0].text === "hello from the cafe",
+      JSON.stringify(delivered.body));
+
+    console.log("\nQueueing while the laptop is between polls");
+    await post("/say?room=QUE234", { text: "first" });
+    await post("/say?room=QUE234", { text: "second" });
+    const drained = await get("/poll?room=QUE234");
+    ok("queues messages sent before the poll arrives",
+      drained.body.messages.length === 2 &&
+        drained.body.messages[0].text === "first" &&
+        drained.body.messages[1].text === "second",
+      JSON.stringify(drained.body));
+
+    console.log("\nSubmit");
+    pending = get("/poll?room=SUB234");
     await sleep(150);
-    const got = laptop.inbox.find((m) => m.type === "text");
-    ok("forwards text to the laptop", got && got.text === "hello from the cafe",
-      JSON.stringify(laptop.inbox));
-
-    phone.inbox.length = 0;
-    phone.sock.send(JSON.stringify({ type: "text", text: "echo check" }));
-    await sleep(150);
-    ok("does not echo back to the sender",
-      !phone.inbox.some((m) => m.type === "text"));
-
-    laptop.inbox.length = 0;
-    phone.sock.send(JSON.stringify({ type: "submit" }));
-    await sleep(150);
-    ok("forwards submit", laptop.inbox.some((m) => m.type === "submit"));
-
-    laptop.inbox.length = 0;
-    phone.sock.send(JSON.stringify({ type: "evil", text: "should not pass" }));
-    await sleep(150);
-    ok("drops unknown message types", laptop.inbox.length === 0);
-
-    laptop.inbox.length = 0;
-    phone.sock.send("this is not json");
-    await sleep(120);
-    ok("survives malformed json", laptop.inbox.length === 0 && phone.sock.readyState === 1);
-
-    console.log("\nKeepalive");
-    phone.inbox.length = 0;
-    phone.sock.send(JSON.stringify({ type: "ping" }));
-    await sleep(150);
-    ok("answers ping with pong", phone.inbox.some((m) => m.type === "pong"));
-
-    laptop.inbox.length = 0;
-    console.log("  (waiting 22s for a server keepalive — this is the service worker fix)");
-    await sleep(22000);
-    ok("server pushes a keepalive inside Chrome's 30s idle window",
-      laptop.inbox.some((m) => m.type === "keepalive"),
-      JSON.stringify(laptop.inbox.slice(0, 3)));
+    await post("/say?room=SUB234", { submit: true });
+    const sub = await pending;
+    ok("relays a submit instruction",
+      sub.body.messages.some((m) => m.type === "submit"),
+      JSON.stringify(sub.body));
 
     console.log("\nUnicode and size");
-    laptop.inbox.length = 0;
-    const unicode = "café — naïve 你好 🎧";
-    phone.sock.send(JSON.stringify({ type: "text", text: unicode }));
+    pending = get("/poll?room=UNI234");
     await sleep(150);
-    const uni = laptop.inbox.find((m) => m.type === "text");
-    ok("preserves multibyte characters", uni && uni.text === unicode,
-      uni ? JSON.stringify(uni.text) : "nothing arrived");
+    const unicode = "café — naïve 你好 🎧";
+    await post("/say?room=UNI234", { text: unicode });
+    const uni = await pending;
+    ok("preserves multibyte characters",
+      uni.body.messages[0].text === unicode,
+      JSON.stringify(uni.body.messages[0]));
 
-    laptop.inbox.length = 0;
+    pending = get("/poll?room=LON234");
+    await sleep(150);
     const long = "word ".repeat(600).trim();
-    phone.sock.send(JSON.stringify({ type: "text", text: long }));
-    await sleep(200);
-    const big = laptop.inbox.find((m) => m.type === "text");
-    ok("handles a long dictation (extended frame length)",
-      big && big.text.length === long.length,
-      big ? `got ${big.text.length} of ${long.length}` : "nothing arrived");
+    await post("/say?room=LON234", { text: long });
+    const big = await pending;
+    ok("handles a long dictation intact",
+      big.body.messages[0].text.length === long.length,
+      `${big.body.messages[0].text.length} of ${long.length}`);
 
-    laptop.inbox.length = 0;
-    phone.sock.send(JSON.stringify({ type: "text", text: "x".repeat(25000) }));
-    await sleep(200);
-    ok("rejects oversized payloads", laptop.inbox.length === 0);
+    console.log("\nNo laptop listening");
+    const orphan = await post("/say?room=NOB234", { text: "into the void" });
+    ok("accepts text with nobody listening", orphan.status === 200);
+    ok("but reports it was not delivered", orphan.body.delivered === false);
 
-    console.log("\nDisconnect");
-    laptop.inbox.length = 0;
-    phone.sock.close();
-    await sleep(250);
-    ok("notifies the survivor when a device leaves",
-      laptop.inbox.some((m) => m.type === "presence" && m.count === 1),
-      JSON.stringify(laptop.inbox));
+    console.log("\nLong-poll timing");
+    const t0 = Date.now();
+    pending = get("/poll?room=TIM234");
+    await sleep(600);
+    await post("/say?room=TIM234", { text: "quick" });
+    await pending;
+    const elapsed = Date.now() - t0;
+    ok("delivers in well under a second of the text being sent",
+      elapsed < 1500, `took ${elapsed}ms`);
 
-    const rejoin = await open("ABC234");
-    await sleep(200);
-    ok("frees the slot for a reconnect", rejoin.sock.readyState === 1);
-    rejoin.sock.close();
-    laptop.sock.close();
+    console.log("\nConcurrent rooms");
+    const a = get("/poll?room=AAA234");
+    const b = get("/poll?room=BBB234");
+    await sleep(150);
+    await post("/say?room=AAA234", { text: "for A" });
+    await post("/say?room=BBB234", { text: "for B" });
+    const [ra, rb] = await Promise.all([a, b]);
+    ok("keeps rooms isolated",
+      ra.body.messages[0].text === "for A" && rb.body.messages[0].text === "for B",
+      JSON.stringify([ra.body, rb.body]));
 
     ok("server logged no errors", serverErr.trim() === "", serverErr.slice(0, 300));
   } catch (err) {
